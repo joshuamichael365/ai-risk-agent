@@ -1,0 +1,15 @@
+{
+  "wafer_id": "801455",
+  "image_path": "WM811k_Dataset/Scratch/801455.jpg",
+  "predicted_defect": "Scratch",
+  "confidence": 0.95,
+  "defect_found": true,
+  "risk_level": "high",
+  "recommended_actions": [
+    "log_result",
+    "create_ticket",
+    "notify_engineering",
+    "schedule_inspection"
+  ],
+  "timestamp": "2026-03-19T21:54:33.739547Z"
+}

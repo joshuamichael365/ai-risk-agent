@@ -1,0 +1,14 @@
+{
+  "wafer_id": "805200",
+  "image_path": "WM811k_Dataset/Center/805200.jpg",
+  "predicted_defect": "Center",
+  "confidence": 0.95,
+  "defect_found": true,
+  "risk_level": "medium",
+  "recommended_actions": [
+    "log_result",
+    "create_review_task",
+    "recommend_manual_check"
+  ],
+  "timestamp": "2026-03-19T21:54:33.684487Z"
+}
