@@ -1,0 +1,14 @@
+{
+  "wafer_id": "800235",
+  "image_path": "WM811k_Dataset/Local/800235.jpg",
+  "predicted_defect": "Local",
+  "confidence": 0.95,
+  "defect_found": true,
+  "risk_level": "medium",
+  "recommended_actions": [
+    "log_result",
+    "create_review_task",
+    "recommend_manual_check"
+  ],
+  "timestamp": "2026-03-19T21:54:33.732720Z"
+}
