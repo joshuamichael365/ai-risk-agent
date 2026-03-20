@@ -1,0 +1,15 @@
+# Model weights
+ml_outputs/
+
+# Dataset
+WM811k_Dataset/
+
+# Generated JSON outputs
+data/sample_outputs/*.json
+
+# Python cache
+__pycache__/
+*.pyc
+
+# Mac system files
+.DS_Store
