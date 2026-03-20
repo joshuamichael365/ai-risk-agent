@@ -4,14 +4,17 @@ import os
 from pathlib import Path
 from typing import Any
 
+import yaml
 from dotenv import load_dotenv
 
 from ibm_watsonx_orchestrate.client.chat.run_client import RunClient
-from ibm_watsonx_orchestrate.client.credentials import Credentials
 
 
-INPUT_DIR = Path("data/workflow_inputs")
-OUTPUT_DIR = Path("data/workflow_outputs")
+REPO_ROOT = Path(__file__).resolve().parents[1]
+INPUT_DIR = REPO_ROOT / "data" / "workflow_inputs"
+OUTPUT_DIR = REPO_ROOT / "data" / "workflow_outputs"
+ORCHESTRATE_CONFIG_PATH = Path.home() / ".config" / "orchestrate" / "config.yaml"
+ORCHESTRATE_CREDENTIALS_PATH = Path.home() / ".cache" / "orchestrate" / "credentials.yaml"
 
 
 def load_json(path: Path) -> dict[str, Any]:
@@ -25,27 +28,58 @@ def save_json(path: Path, payload: dict[str, Any]) -> None:
         json.dump(payload, file_obj, indent=2)
 
 
-def build_credentials() -> Credentials:
+def load_yaml(path: Path) -> dict[str, Any]:
+    if not path.exists():
+        return {}
+
+    with path.open("r", encoding="utf-8") as file_obj:
+        data = yaml.safe_load(file_obj) or {}
+
+    if not isinstance(data, dict):
+        return {}
+    return data
+
+
+def load_cached_orchestrate_token() -> str:
+    config_data = load_yaml(ORCHESTRATE_CONFIG_PATH)
+    credentials_data = load_yaml(ORCHESTRATE_CREDENTIALS_PATH)
+
+    active_environment = (
+        config_data.get("context", {}).get("active_environment")
+        if isinstance(config_data.get("context"), dict)
+        else None
+    )
+    auth_block = credentials_data.get("auth", {})
+
+    if active_environment and isinstance(auth_block, dict):
+        env_auth = auth_block.get(active_environment, {})
+        if isinstance(env_auth, dict):
+            token = str(env_auth.get("wxo_mcsp_token", "")).strip()
+            if token:
+                return token
+
+    return ""
+
+
+def build_client_kwargs() -> dict[str, Any]:
     url = os.getenv("WO_INSTANCE_URL", "").strip()
     api_key = os.getenv("WO_API_KEY", "").strip()
-    token = os.getenv("WO_ACCESS_TOKEN", "").strip()
+    access_token = os.getenv("WO_ACCESS_TOKEN", "").strip() or load_cached_orchestrate_token()
 
     if not url:
         raise ValueError("Missing WO_INSTANCE_URL in .env")
-    if not api_key and not token:
-        raise ValueError("Missing WO_API_KEY or WO_ACCESS_TOKEN in .env")
+    if not api_key and not access_token:
+        raise ValueError(
+            "Missing authentication. Set WO_ACCESS_TOKEN or WO_API_KEY in .env, "
+            "or log in with the orchestrate CLI so the cached MCSP token is available."
+        )
 
-    kwargs: dict[str, Any] = {
+    return {
         "url": url,
+        "base_url": url,
+        "api_key": access_token or api_key,
         "verify": os.getenv("WO_VERIFY_SSL", "true").lower() != "false",
     }
-
-    if token:
-        kwargs["token"] = token
-    else:
-        kwargs["api_key"] = api_key
-
-    return Credentials(**kwargs)
 
 
 def build_prompt(workflow_input: dict[str, Any]) -> str:
@@ -81,6 +115,20 @@ def extract_result_text(status: dict[str, Any]) -> str | None:
                 for part in content:
                     if isinstance(part, dict) and isinstance(part.get("text"), str):
                         return part["text"]
+
+    result = status.get("result")
+    if isinstance(result, dict):
+        data = result.get("data")
+        if isinstance(data, dict):
+            message = data.get("message")
+            if isinstance(message, dict):
+                content = message.get("content")
+                if isinstance(content, str) and content.strip():
+                    return content
+                if isinstance(content, list):
+                    for part in content:
+                        if isinstance(part, dict) and isinstance(part.get("text"), str):
+                            return part["text"]
 
     return None
 
@@ -190,7 +238,12 @@ def main() -> None:
         print(f"No workflow input JSON files found in {INPUT_DIR}")
         return
 
-    run_client = RunClient(credentials=build_credentials())
+    client_kwargs = build_client_kwargs()
+    run_client = RunClient(
+        base_url=client_kwargs["base_url"],
+        api_key=client_kwargs["api_key"],
+        verify=client_kwargs["verify"],
+    )
 
     for input_path in input_files:
         try:
