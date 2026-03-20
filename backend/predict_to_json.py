@@ -3,6 +3,7 @@ import json
 import sys
 from pathlib import Path
 from datetime import datetime
+from typing import Any
 
 import torch
 import torch.nn as nn
@@ -14,8 +15,10 @@ VALID_EXTENSIONS = {".jpg", ".jpeg", ".png", ".bmp", ".tif", ".tiff"}
 # -----------------------------
 # Paths / config
 # -----------------------------
-MODEL_PATH = "ml_outputs/wafer_resnet18_best.pth"
-OUTPUT_DIR = "data/sample_outputs"
+REPO_ROOT = Path(__file__).resolve().parents[1]
+DEFAULT_MODEL_PATH = REPO_ROOT / "ml_outputs" / "wafer_resnet18_best.pth"
+OUTPUT_DIR = REPO_ROOT / "data" / "sample_outputs"
+WORKFLOW_INPUT_DIR = REPO_ROOT / "data" / "workflow_inputs"
 IMG_SIZE = 224
 
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -44,6 +47,30 @@ eval_tf = transforms.Compose([
 _model = None
 
 
+def resolve_model_path() -> Path:
+    explicit = os.getenv("WAFER_MODEL_PATH", "").strip()
+    if explicit:
+        candidate = Path(explicit).expanduser()
+        if candidate.exists():
+            return candidate
+
+    if DEFAULT_MODEL_PATH.exists():
+        return DEFAULT_MODEL_PATH
+
+    model_dir = REPO_ROOT / "ml_outputs"
+    candidates = sorted(model_dir.glob("*.pth"))
+    if candidates:
+        return candidates[-1]
+
+    raise FileNotFoundError(
+        "No trained model weights found.\n"
+        f"Expected default path: {DEFAULT_MODEL_PATH}\n"
+        "Train the model first with:\n"
+        "  python ml/train_wafer.py\n"
+        "Or set WAFER_MODEL_PATH in .env to an existing .pth file."
+    )
+
+
 # -----------------------------
 # Model
 # -----------------------------
@@ -57,14 +84,10 @@ def build_model(num_classes: int):
 def load_model():
     global _model
     if _model is None:
-        if not os.path.exists(MODEL_PATH):
-            raise FileNotFoundError(
-                f"Model weights not found at: {MODEL_PATH}\n"
-                f"Make sure you already ran train_wafer.py successfully."
-            )
+        model_path = resolve_model_path()
 
         model = build_model(len(CLASS_NAMES))
-        state_dict = torch.load(MODEL_PATH, map_location=DEVICE)
+        state_dict = torch.load(model_path, map_location=DEVICE)
         model.load_state_dict(state_dict)
         model.to(DEVICE)
         model.eval()
@@ -141,6 +164,49 @@ def recommended_actions(defect: str, risk_level: str, confidence: float) -> list
     return actions
 
 
+def normalize_defect_label(defect: str) -> str:
+    mapping = {
+        "center": "Center",
+        "donut": "Donut",
+        "edge-local": "Edge-Loc",
+        "edge-ring": "Edge-Ring",
+        "local": "Loc",
+        "near-full": "Near-full",
+        "none": "None",
+        "random": "Random",
+        "scratch": "Scratch",
+    }
+    return mapping.get(defect.strip().lower(), defect)
+
+
+def build_workflow_input(prediction_output: dict[str, Any]) -> dict[str, Any]:
+    wafer_id = prediction_output["wafer_id"]
+    timestamp = datetime.utcnow().strftime("%Y%m%d%H%M%S")
+    lot_id = os.getenv("DEFAULT_LOT_ID", f"LOT-{wafer_id[-4:].upper()}")
+    tool_id = os.getenv("DEFAULT_TOOL_ID", "TOOL-UNKNOWN")
+    process_step = os.getenv("DEFAULT_PROCESS_STEP", "inspection")
+    defect = normalize_defect_label(prediction_output["predicted_defect"])
+    confidence = prediction_output["confidence"]
+    risk_level = prediction_output["risk_level"]
+
+    return {
+        "case_id": f"CASE-{timestamp}-{wafer_id}",
+        "wafer_id": wafer_id,
+        "lot_id": lot_id,
+        "tool_id": tool_id,
+        "process_step": process_step,
+        "wafer_map_summary": (
+            f"Predicted defect {defect} with confidence {confidence}. "
+            f"Risk level is {risk_level}."
+        ),
+        "spc_summary": "",
+        "tool_alarm_summary": "",
+        "lot_history_summary": "",
+        "proposed_actions": prediction_output["recommended_actions"],
+        "prediction": prediction_output,
+    }
+
+
 # -----------------------------
 # JSON builder
 # -----------------------------
@@ -162,13 +228,25 @@ def build_output(image_path: str) -> dict:
 
 
 def save_json(output: dict, output_dir: str = OUTPUT_DIR) -> str:
-    os.makedirs(output_dir, exist_ok=True)
-    out_path = os.path.join(output_dir, f"{output['wafer_id']}.json")
+    output_dir_path = Path(output_dir)
+    output_dir_path.mkdir(parents=True, exist_ok=True)
+    out_path = output_dir_path / f"{output['wafer_id']}.json"
 
     with open(out_path, "w") as f:
         json.dump(output, f, indent=2)
 
-    return out_path
+    return str(out_path)
+
+
+def save_workflow_input(workflow_input: dict[str, Any], output_dir: str = WORKFLOW_INPUT_DIR) -> str:
+    output_dir_path = Path(output_dir)
+    output_dir_path.mkdir(parents=True, exist_ok=True)
+    out_path = output_dir_path / f"{workflow_input['wafer_id']}_workflow_input.json"
+
+    with open(out_path, "w") as f:
+        json.dump(workflow_input, f, indent=2)
+
+    return str(out_path)
 
 
 # -----------------------------
@@ -177,7 +255,9 @@ def save_json(output: dict, output_dir: str = OUTPUT_DIR) -> str:
 def process_single_image(image_path: str, output_dir: str = OUTPUT_DIR) -> None:
     output = build_output(image_path)
     saved_path = save_json(output, output_dir)
+    workflow_saved_path = save_workflow_input(build_workflow_input(output))
     print(f"Saved JSON to: {saved_path}")
+    print(f"Saved workflow input to: {workflow_saved_path}")
     print(json.dumps(output, indent=2))
 
 
@@ -201,11 +281,13 @@ def process_dataset(dataset_dir: str, output_dir: str = OUTPUT_DIR) -> None:
         try:
             output = build_output(image_path)
             save_json(output, output_dir)
+            save_workflow_input(build_workflow_input(output))
             total += 1
         except Exception as e:
             print(f"Failed on {image_path}: {e}")
 
-    print(f"Finished. Saved {total} JSON files to {output_dir}")
+    print(f"Finished. Saved {total} prediction JSON files to {output_dir}")
+    print(f"Workflow inputs saved to {WORKFLOW_INPUT_DIR}")
 
 
 # -----------------------------

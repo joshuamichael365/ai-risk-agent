@@ -1,3 +1,7 @@
+"use client";
+
+import { useEffect, useState } from "react";
+
 type RiskPoint = {
   time: string;
   risk: number;
@@ -26,80 +30,6 @@ type ActionItem = {
   eta: string;
 };
 
-const riskPoints: RiskPoint[] = [
-  { time: "06:00", risk: 16, wafers: 74 },
-  { time: "08:00", risk: 22, wafers: 80 },
-  { time: "10:00", risk: 35, wafers: 93 },
-  { time: "12:00", risk: 47, wafers: 89 },
-  { time: "14:00", risk: 59, wafers: 85 },
-  { time: "16:00", risk: 72, wafers: 81 },
-  { time: "18:00", risk: 68, wafers: 88 },
-];
-
-const defectBreakdown: DefectPoint[] = [
-  { type: "Scratch", count: 27, color: "#fb7185" },
-  { type: "Particle", count: 31, color: "#f59e0b" },
-  { type: "Edge", count: 18, color: "#38bdf8" },
-  { type: "Pattern", count: 22, color: "#34d399" },
-  { type: "Dark", count: 12, color: "#c084fc" },
-];
-
-const recentWafers: WaferRow[] = [
-  {
-    id: "WAF-2411",
-    lot: "LOT-9901",
-    risk: 78,
-    defectType: "Scratch",
-    recommendation: "Hold at CMP bay and inspect optical defect map",
-    status: "Actioned",
-  },
-  {
-    id: "WAF-2409",
-    lot: "LOT-9899",
-    risk: 62,
-    defectType: "Particle",
-    recommendation: "Shift to slower cassette speed for 15 mins",
-    status: "Reviewing",
-  },
-  {
-    id: "WAF-2405",
-    lot: "LOT-9900",
-    risk: 29,
-    defectType: "Clean",
-    recommendation: "Continue normal processing",
-    status: "Normal",
-  },
-  {
-    id: "WAF-2403",
-    lot: "LOT-9888",
-    risk: 94,
-    defectType: "Pattern",
-    recommendation: "Open urgent maintenance order for scanner",
-    status: "Escalated",
-  },
-];
-
-const actionQueue: ActionItem[] = [
-  {
-    title: "Trigger maintenance ticket on WAF-2403 line-4 optics station",
-    source: "Agent rule: defect score > 90",
-    severity: "critical",
-    eta: "12 mins",
-  },
-  {
-    title: "Recommend setpoint reduction for WAF-2409",
-    source: "Agent policy: trend slope increase",
-    severity: "high",
-    eta: "20 mins",
-  },
-  {
-    title: "Push alert to shift team for potential lot diversion",
-    source: "Agent recommendation",
-    severity: "medium",
-    eta: "immediate",
-  },
-];
-
 const severityStyle = {
   low: "bg-emerald-400/20 text-emerald-100 border border-emerald-300/40",
   medium: "bg-amber-400/20 text-amber-100 border border-amber-300/40",
@@ -114,9 +44,50 @@ const statusStyle = {
   Actioned: "bg-blue-500/20 text-blue-100 border border-blue-400/40",
 };
 
-const totalDefects = defectBreakdown.reduce((acc, item) => acc + item.count, 0);
+type RiskResponse = {
+  summary: {
+    currentRisk: string;
+    defectCandidates: number;
+    actionedByAgent: number;
+    modelConfidence: string;
+  };
+  riskPoints: RiskPoint[];
+  defectBreakdown: DefectPoint[];
+  recentWafers: WaferRow[];
+};
 
-function TrendChart() {
+type ActionResponse = {
+  actionQueue: ActionItem[];
+  workflowCount: number;
+};
+
+const emptyRiskResponse: RiskResponse = {
+  summary: {
+    currentRisk: "0.0",
+    defectCandidates: 0,
+    actionedByAgent: 0,
+    modelConfidence: "0%",
+  },
+  riskPoints: [],
+  defectBreakdown: [],
+  recentWafers: [],
+};
+
+const emptyActionResponse: ActionResponse = {
+  actionQueue: [],
+  workflowCount: 0,
+};
+
+function TrendChart({ riskPoints }: { riskPoints: RiskPoint[] }) {
+  if (riskPoints.length === 0) {
+    return (
+      <div className="panel">
+        <h2 className="panel-header">Risk Trend (12h)</h2>
+        <div className="panel-body text-sm text-slate-400">No prediction files found yet.</div>
+      </div>
+    );
+  }
+
   const maxRisk = 100;
   const width = 620;
   const height = 220;
@@ -184,11 +155,16 @@ function TrendChart() {
   );
 }
 
-function DefectBars() {
+function DefectBars({ defectBreakdown }: { defectBreakdown: DefectPoint[] }) {
+  const totalDefects = defectBreakdown.reduce((acc, item) => acc + item.count, 0);
+
   return (
     <div className="panel">
       <h2 className="panel-header">Defect Distribution (Current Shift)</h2>
       <div className="panel-body space-y-3">
+        {defectBreakdown.length === 0 ? (
+          <p className="text-sm text-slate-400">No defect distribution available yet.</p>
+        ) : null}
         {defectBreakdown.map((item) => {
           const widthPercent = Math.round((item.count / totalDefects) * 100);
           return (
@@ -227,7 +203,46 @@ function KpiCard({ label, value, subtext }: { label: string; value: string; subt
 }
 
 export default function HomePage() {
-  // TODO: Replace with API fetch: const response = await fetch("/api/risk-events")
+  const [riskData, setRiskData] = useState<RiskResponse>(emptyRiskResponse);
+  const [actionData, setActionData] = useState<ActionResponse>(emptyActionResponse);
+
+  useEffect(() => {
+    let active = true;
+
+    async function loadDashboard() {
+      try {
+        const [riskRes, actionRes] = await Promise.all([
+          fetch("/api/wafer/risk-events"),
+          fetch("/api/orchestrate/actions"),
+        ]);
+
+        if (!riskRes.ok || !actionRes.ok) {
+          throw new Error("Failed to load dashboard data");
+        }
+
+        const [riskJson, actionJson] = await Promise.all([
+          riskRes.json() as Promise<RiskResponse>,
+          actionRes.json() as Promise<ActionResponse>,
+        ]);
+
+        if (active) {
+          setRiskData(riskJson);
+          setActionData(actionJson);
+        }
+      } catch (error) {
+        console.error("Dashboard load failed", error);
+      }
+    }
+
+    loadDashboard();
+    const timer = window.setInterval(loadDashboard, 10000);
+
+    return () => {
+      active = false;
+      window.clearInterval(timer);
+    };
+  }, []);
+
   return (
     <main className="min-h-screen bg-slate-950 px-4 pb-10 pt-6 text-slate-100 md:px-8">
       <div className="mx-auto flex w-full max-w-7xl flex-col gap-5">
@@ -247,17 +262,29 @@ export default function HomePage() {
         <section className="grid grid-cols-1 gap-4 md:grid-cols-4">
           <KpiCard
             label="Current Risk"
-            value="71.8"
-            subtext="AI score (0-100), rolling 30-min window"
+            value={riskData.summary.currentRisk}
+            subtext="AI score (0-100), recent wafer set"
           />
-          <KpiCard label="Defect Candidates" value="132" subtext="Flagged wafers in this shift" />
-          <KpiCard label="Actioned by Agent" value="9" subtext="3 critical, 2 high in progress" />
-          <KpiCard label="Model Confidence" value="92.7%" subtext="CNN softmax confidence median" />
+          <KpiCard
+            label="Defect Candidates"
+            value={String(riskData.summary.defectCandidates)}
+            subtext="Prediction JSON files available"
+          />
+          <KpiCard
+            label="Actioned by Agent"
+            value={String(riskData.summary.actionedByAgent)}
+            subtext={`${actionData.workflowCount} workflow outputs detected`}
+          />
+          <KpiCard
+            label="Model Confidence"
+            value={riskData.summary.modelConfidence}
+            subtext="Median CNN softmax confidence"
+          />
         </section>
 
         <section className="grid gap-5 xl:grid-cols-[1.75fr_1fr]">
           <div className="space-y-5">
-            <TrendChart />
+            <TrendChart riskPoints={riskData.riskPoints} />
             <div className="panel">
               <h2 className="panel-header">Recent Wafer Predictions</h2>
               <div className="panel-body overflow-x-auto">
@@ -273,7 +300,7 @@ export default function HomePage() {
                     </tr>
                   </thead>
                   <tbody>
-                    {recentWafers.map((row) => (
+                    {riskData.recentWafers.map((row) => (
                       <tr key={row.id} className="border-t border-slate-800">
                         <td className="py-3 pr-2 font-medium">{row.id}</td>
                         <td className="py-3 pr-2">{row.lot}</td>
@@ -287,6 +314,13 @@ export default function HomePage() {
                         </td>
                       </tr>
                     ))}
+                    {riskData.recentWafers.length === 0 ? (
+                      <tr>
+                        <td className="py-6 text-sm text-slate-400" colSpan={6}>
+                          Run `backend/predict_to_json.py` first to generate wafer prediction files.
+                        </td>
+                      </tr>
+                    ) : null}
                   </tbody>
                 </table>
               </div>
@@ -294,11 +328,11 @@ export default function HomePage() {
           </div>
 
           <div className="space-y-5">
-            <DefectBars />
+            <DefectBars defectBreakdown={riskData.defectBreakdown} />
             <div className="panel">
               <h2 className="panel-header">Action Queue</h2>
               <div className="panel-body flex flex-col gap-3">
-                {actionQueue.map((action) => (
+                {actionData.actionQueue.map((action) => (
                   <div key={action.title} className="rounded-lg border border-slate-700 bg-slate-900 p-3">
                     <p className="text-sm text-slate-100">{action.title}</p>
                     <p className="mt-1 text-xs text-slate-300">Source: {action.source}</p>
@@ -310,6 +344,12 @@ export default function HomePage() {
                     </div>
                   </div>
                 ))}
+                {actionData.actionQueue.length === 0 ? (
+                  <p className="text-sm text-slate-400">
+                    No workflow output files found yet. Drop watsonx Orchestrate results into
+                    <code className="ml-1 rounded bg-slate-800 px-1 py-0.5">data/workflow_outputs</code>.
+                  </p>
+                ) : null}
               </div>
             </div>
 
