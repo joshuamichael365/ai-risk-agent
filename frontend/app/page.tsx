@@ -8,12 +8,6 @@ type RiskPoint = {
   wafers: number;
 };
 
-type DefectPoint = {
-  type: string;
-  count: number;
-  color: string;
-};
-
 type WaferRow = {
   id: string;
   lot: string;
@@ -52,13 +46,24 @@ type RiskResponse = {
     modelConfidence: string;
   };
   riskPoints: RiskPoint[];
-  defectBreakdown: DefectPoint[];
   recentWafers: WaferRow[];
 };
 
 type ActionResponse = {
   actionQueue: ActionItem[];
   workflowCount: number;
+  workflowSummary: {
+    casesRequiringApproval: number;
+    openActionPlans: number;
+    lotsPendingHoldReview: number;
+    engineeringTicketsRecommended: number;
+  };
+};
+
+type DashboardSnapshot = {
+  risk: RiskResponse;
+  actions: ActionResponse;
+  generatedAt: string;
 };
 
 const emptyRiskResponse: RiskResponse = {
@@ -69,20 +74,25 @@ const emptyRiskResponse: RiskResponse = {
     modelConfidence: "0%",
   },
   riskPoints: [],
-  defectBreakdown: [],
   recentWafers: [],
 };
 
 const emptyActionResponse: ActionResponse = {
   actionQueue: [],
   workflowCount: 0,
+  workflowSummary: {
+    casesRequiringApproval: 0,
+    openActionPlans: 0,
+    lotsPendingHoldReview: 0,
+    engineeringTicketsRecommended: 0,
+  },
 };
 
 function TrendChart({ riskPoints }: { riskPoints: RiskPoint[] }) {
   if (riskPoints.length === 0) {
     return (
       <div className="panel">
-        <h2 className="panel-header">Risk Trend (12h)</h2>
+        <h2 className="panel-header">Live Risk Score Trend</h2>
         <div className="panel-body text-sm text-slate-400">No prediction files found yet.</div>
       </div>
     );
@@ -96,6 +106,10 @@ function TrendChart({ riskPoints }: { riskPoints: RiskPoint[] }) {
   const plotW = width - padX * 2;
   const plotH = height - padY * 2;
   const step = plotW / (riskPoints.length - 1);
+  const latestRisk = riskPoints[riskPoints.length - 1]?.risk ?? 0;
+  const previousRisk = riskPoints[riskPoints.length - 2]?.risk ?? latestRisk;
+  const delta = latestRisk - previousRisk;
+  const deltaLabel = `${delta >= 0 ? "+" : ""}${delta}`;
 
   const linePath = riskPoints
     .map((point, index) => {
@@ -105,11 +119,32 @@ function TrendChart({ riskPoints }: { riskPoints: RiskPoint[] }) {
     })
     .join(" ");
 
+  const areaPath = `${linePath} L ${padX + step * (riskPoints.length - 1)} ${height - padY} L ${padX} ${
+    height - padY
+  } Z`;
+
   const maxWafers = Math.max(...riskPoints.map((point) => point.wafers));
 
   return (
     <div className="panel">
-      <h2 className="panel-header">Risk Trend (12h)</h2>
+      <div className="panel-header flex items-center justify-between gap-3">
+        <div>
+          <h2>Live Risk Score Trend</h2>
+          <p className="mt-1 text-xs font-normal text-slate-400">
+            Latest 12 prediction events feeding the current risk signal
+          </p>
+        </div>
+        <div className="text-right">
+          <div className="text-2xl font-semibold text-cyan-200">{latestRisk}</div>
+          <div
+            className={`text-xs ${
+              delta > 0 ? "text-rose-300" : delta < 0 ? "text-emerald-300" : "text-slate-400"
+            }`}
+          >
+            {deltaLabel} vs previous event
+          </div>
+        </div>
+      </div>
       <div className="panel-body">
         <svg viewBox={`0 0 ${width} ${height}`} className="h-64 w-full">
           <rect x="0" y="0" width={width} height={height} fill="transparent" />
@@ -127,21 +162,35 @@ function TrendChart({ riskPoints }: { riskPoints: RiskPoint[] }) {
               );
             })}
           </g>
-          <path d={linePath} fill="none" stroke="#38bdf8" strokeWidth="3" />
+          <path d={areaPath} fill="url(#riskArea)" opacity="0.9" />
+          <path d={linePath} fill="none" stroke="#38bdf8" strokeWidth="4" />
+          <defs>
+            <linearGradient id="riskArea" x1="0" y1="0" x2="0" y2="1">
+              <stop offset="0%" stopColor="#38bdf8" stopOpacity="0.35" />
+              <stop offset="100%" stopColor="#38bdf8" stopOpacity="0.02" />
+            </linearGradient>
+          </defs>
           {riskPoints.map((point, index) => {
             const x = padX + step * index;
             const y = padY + (maxRisk - point.risk) * (plotH / maxRisk);
             const barH = (point.wafers / maxWafers) * 40;
             return (
-              <g key={point.time}>
-                <circle cx={x} cy={y} r="4.5" fill="#0ea5e9" />
+              <g key={`${point.time}-${index}`}>
+                <circle cx={x} cy={y} r={index === riskPoints.length - 1 ? "6.5" : "4.5"} fill="#0ea5e9" />
+                <circle
+                  cx={x}
+                  cy={y}
+                  r={index === riskPoints.length - 1 ? "10" : "0"}
+                  fill="#38bdf8"
+                  opacity="0.18"
+                />
                 <rect
                   x={x - 10}
                   y={height - padY}
                   width="20"
                   height={-barH}
-                  fill="#34d399"
-                  opacity="0.55"
+                  fill="#22c55e"
+                  opacity="0.3"
                 />
                 <text x={x} y={height - 4} fontSize="10" fill="#cbd5e1" textAnchor="middle">
                   {point.time}
@@ -150,41 +199,6 @@ function TrendChart({ riskPoints }: { riskPoints: RiskPoint[] }) {
             );
           })}
         </svg>
-      </div>
-    </div>
-  );
-}
-
-function DefectBars({ defectBreakdown }: { defectBreakdown: DefectPoint[] }) {
-  const totalDefects = defectBreakdown.reduce((acc, item) => acc + item.count, 0);
-
-  return (
-    <div className="panel">
-      <h2 className="panel-header">Defect Distribution (Current Shift)</h2>
-      <div className="panel-body space-y-3">
-        {defectBreakdown.length === 0 ? (
-          <p className="text-sm text-slate-400">No defect distribution available yet.</p>
-        ) : null}
-        {defectBreakdown.map((item) => {
-          const widthPercent = Math.round((item.count / totalDefects) * 100);
-          return (
-            <div key={item.type}>
-              <div className="mb-1 flex justify-between text-sm">
-                <span>{item.type}</span>
-                <span className="text-slate-200">{item.count}</span>
-              </div>
-              <div className="h-3 w-full rounded-full bg-slate-800">
-                <div
-                  className="h-full rounded-full"
-                  style={{ width: `${widthPercent}%`, backgroundColor: item.color }}
-                />
-              </div>
-            </div>
-          );
-        })}
-        <p className="pt-2 text-xs text-slate-400">
-          Total analyzed wafers in this view: {totalDefects}
-        </p>
       </div>
     </div>
   );
@@ -205,41 +219,37 @@ function KpiCard({ label, value, subtext }: { label: string; value: string; subt
 export default function HomePage() {
   const [riskData, setRiskData] = useState<RiskResponse>(emptyRiskResponse);
   const [actionData, setActionData] = useState<ActionResponse>(emptyActionResponse);
+  const [connectionState, setConnectionState] = useState<"connecting" | "live" | "offline">("connecting");
 
   useEffect(() => {
-    let active = true;
+    const eventSource = new EventSource("/api/dashboard/stream");
 
-    async function loadDashboard() {
+    eventSource.addEventListener("dashboard-ready", () => {
+      setConnectionState("live");
+    });
+
+    eventSource.addEventListener("dashboard-update", (event) => {
       try {
-        const [riskRes, actionRes] = await Promise.all([
-          fetch("/api/wafer/risk-events"),
-          fetch("/api/orchestrate/actions"),
-        ]);
-
-        if (!riskRes.ok || !actionRes.ok) {
-          throw new Error("Failed to load dashboard data");
-        }
-
-        const [riskJson, actionJson] = await Promise.all([
-          riskRes.json() as Promise<RiskResponse>,
-          actionRes.json() as Promise<ActionResponse>,
-        ]);
-
-        if (active) {
-          setRiskData(riskJson);
-          setActionData(actionJson);
-        }
+        const snapshot = JSON.parse((event as MessageEvent).data) as DashboardSnapshot;
+        setRiskData(snapshot.risk);
+        setActionData(snapshot.actions);
+        setConnectionState("live");
       } catch (error) {
-        console.error("Dashboard load failed", error);
+        console.error("Failed to parse dashboard stream update", error);
       }
-    }
+    });
 
-    loadDashboard();
-    const timer = window.setInterval(loadDashboard, 10000);
+    eventSource.addEventListener("dashboard-error", (event) => {
+      console.error("Dashboard stream error payload", (event as MessageEvent).data);
+      setConnectionState("offline");
+    });
+
+    eventSource.onerror = () => {
+      setConnectionState("offline");
+    };
 
     return () => {
-      active = false;
-      window.clearInterval(timer);
+      eventSource.close();
     };
   }, []);
 
@@ -256,29 +266,45 @@ export default function HomePage() {
               Pipeline preview: Wafer images → CNN defect prediction → risk score + defect type → actions by
               Watsonx Orchestrate → operator dashboard.
             </p>
+            <div className="mt-4 inline-flex items-center gap-2 rounded-full border border-slate-700 bg-slate-900/70 px-3 py-1 text-xs text-slate-300">
+              <span
+                className={`h-2.5 w-2.5 rounded-full ${
+                  connectionState === "live"
+                    ? "bg-emerald-400"
+                    : connectionState === "connecting"
+                      ? "bg-amber-400"
+                      : "bg-rose-400"
+                }`}
+              />
+              {connectionState === "live"
+                ? "Live dashboard stream connected"
+                : connectionState === "connecting"
+                  ? "Connecting to live dashboard stream"
+                  : "Live stream disconnected"}
+            </div>
           </div>
         </header>
 
         <section className="grid grid-cols-1 gap-4 md:grid-cols-4">
           <KpiCard
-            label="Current Risk"
-            value={riskData.summary.currentRisk}
-            subtext="AI score (0-100), recent wafer set"
+            label="Cases Requiring Approval"
+            value={String(actionData.workflowSummary.casesRequiringApproval)}
+            subtext="Workflow cases waiting on human approval"
           />
           <KpiCard
-            label="Defect Candidates"
-            value={String(riskData.summary.defectCandidates)}
-            subtext="Prediction JSON files available"
+            label="Open Action Plans"
+            value={String(actionData.workflowSummary.openActionPlans)}
+            subtext="Workflow outputs with planned next steps"
           />
           <KpiCard
-            label="Actioned by Agent"
-            value={String(riskData.summary.actionedByAgent)}
+            label="Lots Pending Hold Review"
+            value={String(actionData.workflowSummary.lotsPendingHoldReview)}
+            subtext="Cases mentioning lot hold or containment review"
+          />
+          <KpiCard
+            label="Engineering Tickets Recommended"
+            value={String(actionData.workflowSummary.engineeringTicketsRecommended)}
             subtext={`${actionData.workflowCount} workflow outputs detected`}
-          />
-          <KpiCard
-            label="Model Confidence"
-            value={riskData.summary.modelConfidence}
-            subtext="Median CNN softmax confidence"
           />
         </section>
 
@@ -328,12 +354,14 @@ export default function HomePage() {
           </div>
 
           <div className="space-y-5">
-            <DefectBars defectBreakdown={riskData.defectBreakdown} />
             <div className="panel">
               <h2 className="panel-header">Action Queue</h2>
               <div className="panel-body flex flex-col gap-3">
-                {actionData.actionQueue.map((action) => (
-                  <div key={action.title} className="rounded-lg border border-slate-700 bg-slate-900 p-3">
+                {actionData.actionQueue.map((action, index) => (
+                  <div
+                    key={`${action.source}-${action.title}-${index}`}
+                    className="rounded-lg border border-slate-700 bg-slate-900 p-3"
+                  >
                     <p className="text-sm text-slate-100">{action.title}</p>
                     <p className="mt-1 text-xs text-slate-300">Source: {action.source}</p>
                     <div className="mt-2 flex items-center justify-between">
@@ -354,15 +382,15 @@ export default function HomePage() {
             </div>
 
             <div className="panel">
-              <h2 className="panel-header">Connection Placeholder</h2>
+              <h2 className="panel-header">Live Connection</h2>
               <div className="panel-body text-sm text-slate-300">
-                Replace this area with API polling/WebSocket updates:
+                The dashboard now listens to a live server-sent event stream:
                 <ul className="mt-2 list-disc space-y-1 pl-5">
                   <li>
-                    <code className="rounded bg-slate-800 px-1 py-0.5">/api/wafer/risk-events</code> for PostgreSQL-backed risk rows
+                    <code className="rounded bg-slate-800 px-1 py-0.5">/api/dashboard/stream</code> pushes prediction and workflow updates
                   </li>
                   <li>
-                    <code className="rounded bg-slate-800 px-1 py-0.5">/api/orchestrate/actions</code> for agent recommendations
+                    New files in <code className="rounded bg-slate-800 px-1 py-0.5">data/workflow_outputs</code> are reflected automatically
                   </li>
                 </ul>
               </div>
