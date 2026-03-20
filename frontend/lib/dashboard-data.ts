@@ -19,6 +19,16 @@ export type WorkflowRecord = {
   case_id?: string;
   wafer_id?: string;
   lot_id?: string;
+  final_status?: {
+    completed_at?: string;
+    result?: {
+      data?: {
+        message?: {
+          content?: Array<{ text?: string }>;
+        };
+      };
+    };
+  };
   final_recommendation?: string;
   approval_required?: boolean;
   next_human_owner?: string;
@@ -39,6 +49,20 @@ export type WorkflowRecord = {
     diagnosis_result?: { predicted_defect?: string };
     compliance_result?: { compliance_status?: string };
   };
+};
+
+type NormalizedActionPlanItem = {
+  title: string;
+  severity: Severity;
+  eta: string;
+  source: string;
+};
+
+type RiskEvent = {
+  time: string;
+  timestamp: string;
+  risk: number;
+  wafers: number;
 };
 
 export type RiskPoint = {
@@ -69,16 +93,11 @@ export type ActionItem = {
   eta: string;
 };
 
-const DEFECT_COLORS: Record<string, string> = {
-  Scratch: "#fb7185",
-  Random: "#f59e0b",
-  "Edge-Ring": "#38bdf8",
-  "Edge-Loc": "#38bdf8",
-  Donut: "#34d399",
-  Center: "#a78bfa",
-  Loc: "#22c55e",
-  "Near-full": "#ef4444",
-  None: "#94a3b8",
+export type WorkflowSummary = {
+  casesRequiringApproval: number;
+  openActionPlans: number;
+  lotsPendingHoldReview: number;
+  engineeringTicketsRecommended: number;
 };
 
 function repoRoot(): string {
@@ -143,12 +162,31 @@ async function readJsonFiles<T>(dirPath: string): Promise<T[]> {
   }
 }
 
+function extractParsedResultFromFinalStatus(workflow?: WorkflowRecord) {
+  const parts = workflow?.final_status?.result?.data?.message?.content;
+  if (!Array.isArray(parts)) {
+    return undefined;
+  }
+
+  for (const part of parts) {
+    if (typeof part?.text === "string" && part.text.trim()) {
+      try {
+        return JSON.parse(part.text);
+      } catch {
+        return undefined;
+      }
+    }
+  }
+
+  return undefined;
+}
+
 function normalizeWorkflowRecord(workflow?: WorkflowRecord) {
   if (!workflow) {
     return undefined;
   }
 
-  const parsed = workflow.parsed_result ?? {};
+  const parsed = workflow.parsed_result ?? extractParsedResultFromFinalStatus(workflow) ?? {};
   return {
     ...parsed,
     ...workflow,
@@ -164,8 +202,111 @@ function normalizeWorkflowRecord(workflow?: WorkflowRecord) {
   };
 }
 
+function severityFromWorkflow(workflow: ReturnType<typeof normalizeWorkflowRecord>): Severity {
+  if (!workflow) {
+    return "medium";
+  }
+
+  const approval = workflow.approval_required;
+  if (Array.isArray(approval) && approval.length > 0) {
+    return "high";
+  }
+  if (approval === true) {
+    return "high";
+  }
+
+  const recommendation = (workflow.final_recommendation ?? "").toLowerCase();
+  if (recommendation.includes("urgent") || recommendation.includes("critical")) {
+    return "critical";
+  }
+  if (recommendation.includes("hold") || recommendation.includes("inspection")) {
+    return "high";
+  }
+
+  return "medium";
+}
+
+function normalizeActionPlanItems(
+  workflow: ReturnType<typeof normalizeWorkflowRecord>,
+): NormalizedActionPlanItem[] {
+  if (!workflow) {
+    return [];
+  }
+
+  const severity = severityFromWorkflow(workflow);
+
+  return (workflow.action_plan ?? []).map((item) => {
+    const actionType =
+      (item as Record<string, unknown>).action_type ??
+      (item as Record<string, unknown>).action ??
+      "workflow_action";
+    const details =
+      typeof (item as Record<string, unknown>).details === "object" &&
+      (item as Record<string, unknown>).details !== null
+        ? ((item as Record<string, unknown>).details as Record<string, unknown>)
+        : {};
+    const explicitReason =
+      typeof (item as Record<string, unknown>).reason === "string"
+        ? ((item as Record<string, unknown>).reason as string)
+        : "";
+
+    const title =
+      (typeof details.title === "string" && details.title) ||
+      (typeof details.message === "string" && details.message) ||
+      explicitReason ||
+      String(actionType).replaceAll("_", " ");
+
+    const status =
+      typeof (item as Record<string, unknown>).status === "string"
+        ? ((item as Record<string, unknown>).status as string)
+        : "";
+
+    return {
+      title,
+      severity,
+      eta: status.includes("blocked") ? "awaiting approval" : "ready",
+      source: workflow.case_id ? `Workflow ${workflow.case_id}` : "Workflow output",
+    };
+  });
+}
+
+function riskFromWorkflow(
+  prediction: PredictionRecord,
+  workflow: ReturnType<typeof normalizeWorkflowRecord>,
+): number {
+  let risk = safeRoundRisk(prediction.confidence, prediction.risk_level);
+  if (!workflow) {
+    return risk;
+  }
+
+  const serializedPlan = JSON.stringify(workflow.action_plan ?? []).toLowerCase();
+  const recommendation = (workflow.final_recommendation ?? "").toLowerCase();
+  const approval = workflow.approval_required;
+
+  if (approval === true || (Array.isArray(approval) && approval.length > 0)) {
+    risk += 12;
+  }
+  if (serializedPlan.includes("hold_lot") || serializedPlan.includes("hold lot") || recommendation.includes("hold")) {
+    risk += 18;
+  }
+  if (
+    serializedPlan.includes("tool_inspection") ||
+    serializedPlan.includes("engineering_ticket") ||
+    serializedPlan.includes("open_engineering_ticket")
+  ) {
+    risk += 8;
+  }
+
+  return Math.min(risk, 100);
+}
+
 export async function getPredictionRecords(): Promise<PredictionRecord[]> {
-  return readJsonFiles<PredictionRecord>(path.join(repoRoot(), "data", "sample_outputs"));
+  const records = await readJsonFiles<PredictionRecord>(path.join(repoRoot(), "data", "sample_outputs"));
+  return records.sort((a, b) => {
+    const timeA = new Date(a.timestamp).getTime();
+    const timeB = new Date(b.timestamp).getTime();
+    return timeB - timeA;
+  });
 }
 
 export async function getWorkflowRecords(): Promise<WorkflowRecord[]> {
@@ -181,9 +322,18 @@ export async function buildRiskEventsResponse() {
       .map((record) => [record.wafer_id as string, record]),
   );
 
-  const recentWafers: WaferRow[] = predictions.slice(0, 8).map((prediction) => {
+  const prioritizedPredictions = [...predictions].sort((a, b) => {
+    const aHasWorkflow = workflowByWafer.has(a.wafer_id) ? 1 : 0;
+    const bHasWorkflow = workflowByWafer.has(b.wafer_id) ? 1 : 0;
+    if (aHasWorkflow !== bHasWorkflow) {
+      return bHasWorkflow - aHasWorkflow;
+    }
+    return new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime();
+  });
+
+  const recentWafers: WaferRow[] = prioritizedPredictions.slice(0, 8).map((prediction) => {
     const workflow = normalizeWorkflowRecord(workflowByWafer.get(prediction.wafer_id));
-    const risk = safeRoundRisk(prediction.confidence, prediction.risk_level);
+    const risk = riskFromWorkflow(prediction, workflow);
     return {
       id: prediction.wafer_id,
       lot: workflow?.lot_id ?? `LOT-${prediction.wafer_id.slice(-4).toUpperCase()}`,
@@ -196,22 +346,37 @@ export async function buildRiskEventsResponse() {
     };
   });
 
-  const groupedByHour = new Map<string, { riskTotal: number; wafers: number }>();
-  for (const prediction of predictions) {
-    const hour = new Date(prediction.timestamp).toISOString().slice(11, 16);
-    const current = groupedByHour.get(hour) ?? { riskTotal: 0, wafers: 0 };
-    current.riskTotal += safeRoundRisk(prediction.confidence, prediction.risk_level);
-    current.wafers += 1;
-    groupedByHour.set(hour, current);
-  }
+  const riskEvents: RiskEvent[] = predictions.flatMap((prediction) => {
+    const workflow = normalizeWorkflowRecord(workflowByWafer.get(prediction.wafer_id));
+    const events: RiskEvent[] = [
+      {
+        time: new Date(prediction.timestamp).toISOString().slice(11, 16),
+        timestamp: prediction.timestamp,
+        risk: safeRoundRisk(prediction.confidence, prediction.risk_level),
+        wafers: 1,
+      },
+    ];
 
-  const riskPoints: RiskPoint[] = [...groupedByHour.entries()]
-    .sort(([a], [b]) => a.localeCompare(b))
-    .slice(-8)
-    .map(([time, value]) => ({
-      time,
-      risk: Math.round(value.riskTotal / value.wafers),
-      wafers: value.wafers,
+    const completedAt = workflowByWafer.get(prediction.wafer_id)?.final_status?.completed_at;
+    if (workflow && completedAt) {
+      events.push({
+        time: new Date(completedAt).toISOString().slice(11, 16),
+        timestamp: completedAt,
+        risk: riskFromWorkflow(prediction, workflow),
+        wafers: 1,
+      });
+    }
+
+    return events;
+  });
+
+  const riskPoints: RiskPoint[] = riskEvents
+    .sort((a, b) => new Date(a.timestamp).getTime() - new Date(b.timestamp).getTime())
+    .slice(-12)
+    .map((event) => ({
+      time: event.time,
+      risk: event.risk,
+      wafers: event.wafers,
     }));
 
   const defectCounts = new Map<string, number>();
@@ -220,20 +385,8 @@ export async function buildRiskEventsResponse() {
     defectCounts.set(defectType, (defectCounts.get(defectType) ?? 0) + 1);
   }
 
-  const defectBreakdown: DefectPoint[] = [...defectCounts.entries()]
-    .sort((a, b) => b[1] - a[1])
-    .slice(0, 6)
-    .map(([type, count]) => ({
-      type,
-      count,
-      color: DEFECT_COLORS[type] ?? "#94a3b8",
-    }));
-
   const actionedCount = recentWafers.filter((row) => row.status === "Actioned").length;
-  const averageRisk =
-    recentWafers.length > 0
-      ? (recentWafers.reduce((sum, row) => sum + row.risk, 0) / recentWafers.length).toFixed(1)
-      : "0.0";
+  const currentRisk = riskPoints.length > 0 ? riskPoints[riskPoints.length - 1].risk.toFixed(1) : "0.0";
   const confidenceMedian =
     predictions.length > 0
       ? `${Math.round(
@@ -245,33 +398,56 @@ export async function buildRiskEventsResponse() {
 
   return {
     summary: {
-      currentRisk: averageRisk,
+      currentRisk,
       defectCandidates: predictions.length,
       actionedByAgent: actionedCount,
       modelConfidence: confidenceMedian,
     },
     riskPoints,
-    defectBreakdown,
     recentWafers,
   };
 }
 
 export async function buildActionQueueResponse() {
   const workflows = await getWorkflowRecords();
+  let casesRequiringApproval = 0;
+  let openActionPlans = 0;
+  let lotsPendingHoldReview = 0;
+  let engineeringTicketsRecommended = 0;
+
   const actionQueue: ActionItem[] = workflows.flatMap((record) => {
     const workflow = normalizeWorkflowRecord(record);
     if (!workflow) {
       return [];
     }
 
-    const plan = workflow.action_plan ?? [];
+    const approval = workflow.approval_required;
+    if (approval === true || (Array.isArray(approval) && approval.length > 0)) {
+      casesRequiringApproval += 1;
+    }
+
+    const plan = normalizeActionPlanItems(workflow);
     if (plan.length > 0) {
-      return plan.map((item) => ({
-        title: item.title ?? "Planned wafer response action",
-        source: workflow.case_id ? `Workflow ${workflow.case_id}` : "Workflow output",
-        severity: item.severity ?? "medium",
-        eta: workflow.approval_required ? "awaiting approval" : "ready",
-      }));
+      openActionPlans += 1;
+    }
+
+    const serializedPlan = JSON.stringify(workflow.action_plan ?? []).toLowerCase();
+    const recommendation = (workflow.final_recommendation ?? "").toLowerCase();
+
+    if (serializedPlan.includes("hold_lot") || serializedPlan.includes("hold lot") || recommendation.includes("hold")) {
+      lotsPendingHoldReview += 1;
+    }
+
+    if (
+      serializedPlan.includes("engineering_ticket") ||
+      serializedPlan.includes("open_engineering_ticket") ||
+      recommendation.includes("engineering ticket")
+    ) {
+      engineeringTicketsRecommended += 1;
+    }
+
+    if (plan.length > 0) {
+      return plan;
     }
 
     if (workflow.final_recommendation) {
@@ -279,8 +455,12 @@ export async function buildActionQueueResponse() {
         {
           title: workflow.final_recommendation,
           source: workflow.case_id ? `Workflow ${workflow.case_id}` : "Workflow output",
-          severity: workflow.approval_required ? "high" : "medium",
-          eta: workflow.approval_required ? "awaiting approval" : "ready",
+          severity: severityFromWorkflow(workflow),
+          eta:
+            workflow.approval_required === true ||
+            (Array.isArray(workflow.approval_required) && workflow.approval_required.length > 0)
+              ? "awaiting approval"
+              : "ready",
         },
       ];
     }
@@ -291,5 +471,24 @@ export async function buildActionQueueResponse() {
   return {
     actionQueue: actionQueue.slice(0, 8),
     workflowCount: workflows.length,
+    workflowSummary: {
+      casesRequiringApproval,
+      openActionPlans,
+      lotsPendingHoldReview,
+      engineeringTicketsRecommended,
+    },
+  };
+}
+
+export async function buildDashboardSnapshot() {
+  const [risk, actions] = await Promise.all([
+    buildRiskEventsResponse(),
+    buildActionQueueResponse(),
+  ]);
+
+  return {
+    risk,
+    actions,
+    generatedAt: new Date().toISOString(),
   };
 }
