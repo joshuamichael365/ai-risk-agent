@@ -13,3 +13,9 @@ __pycache__/
 
 # Mac system files
 .DS_Store
+
+.venv/
+
+# Local environment secrets
+.env
+.env.local
