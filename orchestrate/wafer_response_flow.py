@@ -1,10 +1,9 @@
-from __future__ import annotations
-
 from typing import Any
 
 from pydantic import BaseModel, Field
 
-from ibm_watsonx_orchestrate.experimental.flow_builder.flows import flow
+from ibm_watsonx_orchestrate.flow_builder.flows import flow, START, END
+from ibm_watsonx_orchestrate.flow_builder.flows.flow import Flow
 
 
 class WaferCaseInput(BaseModel):
@@ -32,20 +31,29 @@ class WaferFlowOutput(BaseModel):
     input_schema=WaferCaseInput,
     output_schema=WaferFlowOutput,
     name="wafer_response_flow",
+    description="Run wafer triage, diagnosis, compliance review, and follow-up actions.",
 )
-def wafer_response_flow(aflow):
-    """
-    Scaffold flow for watsonx Orchestrate.
+def wafer_response_flow(aflow: Flow) -> Flow:
+    """Coordinate the wafer response workflow across agents and tools."""
 
-    Notes:
-    - The exact agent reference syntax can vary by Orchestrate version.
-    - Replace agent names with the exact import-time references used in your environment.
-    - Start with this minimal sequence, then add conditional branches once the basic flow imports cleanly.
-    """
-
-    monitor = aflow.agent("Wafer Monitor Agent")
-    diagnosis = aflow.agent("Wafer Diagnosis Agent")
-    compliance = aflow.agent("Wafer Compliance Agent")
+    monitor = aflow.agent(
+        name="monitor",
+        agent="Wafer Monitor Agent",
+        display_name="monitor",
+        description="Run wafer triage first and decide whether escalation is needed.",
+    )
+    diagnosis = aflow.agent(
+        name="diagnosis",
+        agent="Wafer Diagnosis Agent",
+        display_name="diagnosis",
+        description="Run defect classification and engineering hypothesis generation.",
+    )
+    compliance = aflow.agent(
+        name="compliance",
+        agent="Wafer Compliance Agent",
+        display_name="compliance",
+        description="Review proposed actions before any execution occurs.",
+    )
 
     create_case_log = aflow.tool("create_case_log")
     create_engineering_ticket = aflow.tool("create_engineering_ticket")
@@ -53,7 +61,7 @@ def wafer_response_flow(aflow):
     export_rca_report = aflow.tool("export_rca_report")
 
     aflow.sequence(
-        aflow.START,
+        START,
         monitor,
         diagnosis,
         compliance,
@@ -61,5 +69,7 @@ def wafer_response_flow(aflow):
         create_engineering_ticket,
         send_escalation_notification,
         export_rca_report,
-        aflow.END,
+        END,
     )
+
+    return aflow

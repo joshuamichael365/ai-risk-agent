@@ -13,6 +13,7 @@ import random
 import time
 from glob import glob
 from collections import Counter
+from pathlib import Path
 
 import numpy as np
 from PIL import Image
@@ -27,8 +28,9 @@ from sklearn.metrics import accuracy_score, precision_score, recall_score, f1_sc
 # -----------------------------
 # Config
 # -----------------------------
-DATA_DIR = "./WM811k_Dataset"
-SAVE_DIR = "./ml_outputs"
+REPO_ROOT = Path(__file__).resolve().parents[1]
+DATA_DIR = str(REPO_ROOT / "WM811k_Dataset")
+SAVE_DIR = str(REPO_ROOT / "ml_outputs")
 os.makedirs(SAVE_DIR, exist_ok=True)
 
 IMG_SIZE = 224
@@ -224,7 +226,12 @@ val_dl = DataLoader(
 # Model
 # -----------------------------
 def build_model(num_classes):
-    model = models.resnet18(weights="DEFAULT")
+    try:
+        model = models.resnet18(weights="DEFAULT")
+    except Exception as exc:
+        print(f"[WARN] Failed to load pretrained ResNet18 weights: {exc}")
+        print("[WARN] Falling back to randomly initialized ResNet18.")
+        model = models.resnet18(weights=None)
     in_features = model.fc.in_features
     model.fc = nn.Linear(in_features, num_classes)
     return model
